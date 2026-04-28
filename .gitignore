@@ -1,0 +1,6 @@
+# Compiled binary
+nx-mcp
+
+# Go workspace file
+go.work
+go.work.sum
