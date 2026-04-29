@@ -6,10 +6,10 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) server for i
 
 | Tool | Description |
 |------|-------------|
-| `nx_load` | Load an `.nx` file from disk into memory. Must be called before any other tool. |
-| `nx_list_node` | List the children of a node at a given path. Omit `path` to start at the root. Supports a `depth` parameter (1–10). |
-| `nx_get_node` | Get the type, data value, and immediate children of a specific node. |
-| `nx_search` | Search all node names for a case-insensitive substring. Returns matching full paths. |
+| `nx_load` | Load all `.nx` files from a directory into memory. Omit `dir` to use the current working directory. Must be called before any other tool. |
+| `nx_list_node` | List the children of a node at a given path. Omit `path` to start at the root. Supports `depth` (1–10) and an optional `file` parameter when multiple files are loaded. |
+| `nx_get_node` | Get the type, data value, and immediate children of a specific node. Accepts an optional `file` parameter when multiple files are loaded. |
+| `nx_search` | Search all node names for a case-insensitive substring. Returns matching full paths. Accepts an optional `file` parameter when multiple files are loaded. |
 
 ### Node types
 
@@ -44,20 +44,25 @@ The server communicates over **stdio** using the MCP JSON-RPC protocol and can b
 ### Example session
 
 ```
-nx_load   file="/path/to/Data.nx"
+nx_load   dir="/path/to/nx/files"
   → Loaded Data.nx
-      nodes:   4439446
-      strings: 25921
-      bitmaps: 0
-      audio:   0
+        nodes:   4439446
+        strings: 25921
+        bitmaps: 0
+        audio:   0
+    Loaded Sound.nx
+        nodes:   12345
+        strings: 500
+        bitmaps: 0
+        audio:   200
 
-nx_list_node   path=""   depth=1
+nx_list_node   file="Data.nx"   path=""   depth=1
   →   [none]  children=14
         Character  [none]  children=25
         Effect     [none]  children=10
         ...
 
-nx_get_node   path="Character/00002000.img"
+nx_get_node   file="Data.nx"   path="Character/00002000.img"
   → name:     00002000.img
     type:     none
     children: 4
@@ -65,7 +70,7 @@ nx_get_node   path="Character/00002000.img"
       - stand1  [none]
       ...
 
-nx_search   pattern="stand"   max_results=20
+nx_search   file="Data.nx"   pattern="stand"   max_results=20
   → found 3 result(s) for "stand"
     Character/00002000.img/stand1  [none]
     ...

@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/binary"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
-// buildMinimalNX constructs a minimal valid PKG4 NX file and writes it to a temp file.
+// buildMinimalNXDir constructs a minimal valid PKG4 NX file named "test.nx" inside
+// a new temp directory and returns that directory path.
+//
 // The tree has the following nodes (id: name, type):
 //
 // 0: ""             none   (root, 3 children starting at id 1)
@@ -32,7 +35,15 @@ import (
 // [32] int64    BitmapOffsetTableOffset
 // [40] uint32   AudioCount
 // [44] int64    AudioOffsetTableOffset
-func buildMinimalNX(t *testing.T) string {
+func buildMinimalNXDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeNXFile(t, dir, "test.nx")
+	return dir
+}
+
+// writeNXFile writes a minimal PKG4 NX file with a known node tree into dir/name.
+func writeNXFile(t *testing.T, dir, name string) string {
 	t.Helper()
 
 	const (
@@ -106,21 +117,16 @@ func buildMinimalNX(t *testing.T) string {
 		copy(buf[pos+2:], e.data)
 	}
 
-	f, err := os.CreateTemp(t.TempDir(), "test_*.nx")
-	if err != nil {
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Write(buf); err != nil {
-		t.Fatal(err)
-	}
-	name := f.Name()
-	f.Close()
-	return name
+	return path
 }
 
 func resetState() {
 	mu.Lock()
-	current = nil
+	loaded = nil
 	mu.Unlock()
 }
 
@@ -145,25 +151,39 @@ func TestNodeTypeName(t *testing.T) {
 	}
 }
 
-func TestHandleNxLoadBadFile(t *testing.T) {
+func TestHandleNxLoadBadDir(t *testing.T) {
 	resetState()
 	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{"file": "/tmp/does_not_exist_nx_test.nx"}
+	req.Params.Arguments = map[string]any{"dir": "/tmp/does_not_exist_nx_test_dir_xyz"}
 	result, err := handleNxLoad(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !result.IsError {
-		t.Fatal("expected error result for missing file")
+		t.Fatal("expected error result for missing directory")
+	}
+}
+
+func TestHandleNxLoadEmptyDir(t *testing.T) {
+	resetState()
+	dir := t.TempDir() // no .nx files
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"dir": dir}
+	result, err := handleNxLoad(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error result for directory with no .nx files")
 	}
 }
 
 func TestHandleNxLoad(t *testing.T) {
 	resetState()
-	path := buildMinimalNX(t)
+	dir := buildMinimalNXDir(t)
 
 	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{"file": path}
+	req.Params.Arguments = map[string]any{"dir": dir}
 	result, err := handleNxLoad(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -177,6 +197,34 @@ func TestHandleNxLoad(t *testing.T) {
 	}
 	if !strings.Contains(text, "strings: 6") {
 		t.Errorf("expected 6 strings in output, got: %s", text)
+	}
+}
+
+func TestHandleNxLoadMultipleFiles(t *testing.T) {
+	resetState()
+	dir := t.TempDir()
+	writeNXFile(t, dir, "a.nx")
+	writeNXFile(t, dir, "b.nx")
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"dir": dir}
+	result, err := handleNxLoad(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("load failed: %v", result.Content)
+	}
+	text := result.Content[0].(mcp.TextContent).Text
+	if !strings.Contains(text, "a.nx") || !strings.Contains(text, "b.nx") {
+		t.Errorf("expected both files in output, got: %s", text)
+	}
+
+	mu.RLock()
+	n := len(loaded)
+	mu.RUnlock()
+	if n != 2 {
+		t.Errorf("expected 2 files loaded, got %d", n)
 	}
 }
 
@@ -195,10 +243,10 @@ func TestHandleNxListNodeNoFile(t *testing.T) {
 
 func TestHandleNxListNodeRoot(t *testing.T) {
 	resetState()
-	path := buildMinimalNX(t)
+	dir := buildMinimalNXDir(t)
 
 	loadReq := mcp.CallToolRequest{}
-	loadReq.Params.Arguments = map[string]any{"file": path}
+	loadReq.Params.Arguments = map[string]any{"dir": dir}
 	if _, err := handleNxLoad(context.Background(), loadReq); err != nil {
 		t.Fatal(err)
 	}
@@ -220,10 +268,10 @@ func TestHandleNxListNodeRoot(t *testing.T) {
 
 func TestHandleNxListNodePath(t *testing.T) {
 	resetState()
-	path := buildMinimalNX(t)
+	dir := buildMinimalNXDir(t)
 
 	loadReq := mcp.CallToolRequest{}
-	loadReq.Params.Arguments = map[string]any{"file": path}
+	loadReq.Params.Arguments = map[string]any{"dir": dir}
 	if _, err := handleNxLoad(context.Background(), loadReq); err != nil {
 		t.Fatal(err)
 	}
@@ -243,12 +291,47 @@ func TestHandleNxListNodePath(t *testing.T) {
 	}
 }
 
-func TestHandleNxListNodeInvalidPath(t *testing.T) {
+func TestHandleNxListNodeFileParam(t *testing.T) {
 	resetState()
-	path := buildMinimalNX(t)
+	dir := t.TempDir()
+	writeNXFile(t, dir, "a.nx")
+	writeNXFile(t, dir, "b.nx")
 
 	loadReq := mcp.CallToolRequest{}
-	loadReq.Params.Arguments = map[string]any{"file": path}
+	loadReq.Params.Arguments = map[string]any{"dir": dir}
+	if _, err := handleNxLoad(context.Background(), loadReq); err != nil {
+		t.Fatal(err)
+	}
+
+	// With multiple files loaded, omitting 'file' should error.
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"depth": float64(1)}
+	result, err := handleNxListNode(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error when file not specified with multiple files loaded")
+	}
+
+	// Specifying 'file' should succeed.
+	req2 := mcp.CallToolRequest{}
+	req2.Params.Arguments = map[string]any{"file": "a.nx", "depth": float64(1)}
+	result2, err := handleNxListNode(context.Background(), req2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result2.IsError {
+		t.Fatalf("list node with file param failed: %v", result2.Content)
+	}
+}
+
+func TestHandleNxListNodeInvalidPath(t *testing.T) {
+	resetState()
+	dir := buildMinimalNXDir(t)
+
+	loadReq := mcp.CallToolRequest{}
+	loadReq.Params.Arguments = map[string]any{"dir": dir}
 	if _, err := handleNxLoad(context.Background(), loadReq); err != nil {
 		t.Fatal(err)
 	}
@@ -266,10 +349,10 @@ func TestHandleNxListNodeInvalidPath(t *testing.T) {
 
 func TestHandleNxGetNode(t *testing.T) {
 	resetState()
-	path := buildMinimalNX(t)
+	dir := buildMinimalNXDir(t)
 
 	loadReq := mcp.CallToolRequest{}
-	loadReq.Params.Arguments = map[string]any{"file": path}
+	loadReq.Params.Arguments = map[string]any{"dir": dir}
 	if _, err := handleNxLoad(context.Background(), loadReq); err != nil {
 		t.Fatal(err)
 	}
@@ -294,10 +377,10 @@ func TestHandleNxGetNode(t *testing.T) {
 
 func TestHandleNxGetNodeString(t *testing.T) {
 	resetState()
-	path := buildMinimalNX(t)
+	dir := buildMinimalNXDir(t)
 
 	loadReq := mcp.CallToolRequest{}
-	loadReq.Params.Arguments = map[string]any{"file": path}
+	loadReq.Params.Arguments = map[string]any{"dir": dir}
 	if _, err := handleNxLoad(context.Background(), loadReq); err != nil {
 		t.Fatal(err)
 	}
@@ -319,10 +402,10 @@ func TestHandleNxGetNodeString(t *testing.T) {
 
 func TestHandleNxSearch(t *testing.T) {
 	resetState()
-	path := buildMinimalNX(t)
+	dir := buildMinimalNXDir(t)
 
 	loadReq := mcp.CallToolRequest{}
-	loadReq.Params.Arguments = map[string]any{"file": path}
+	loadReq.Params.Arguments = map[string]any{"dir": dir}
 	if _, err := handleNxLoad(context.Background(), loadReq); err != nil {
 		t.Fatal(err)
 	}
@@ -347,10 +430,10 @@ func TestHandleNxSearch(t *testing.T) {
 
 func TestHandleNxSearchNoMatch(t *testing.T) {
 	resetState()
-	path := buildMinimalNX(t)
+	dir := buildMinimalNXDir(t)
 
 	loadReq := mcp.CallToolRequest{}
-	loadReq.Params.Arguments = map[string]any{"file": path}
+	loadReq.Params.Arguments = map[string]any{"dir": dir}
 	if _, err := handleNxLoad(context.Background(), loadReq); err != nil {
 		t.Fatal(err)
 	}

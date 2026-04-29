@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -15,7 +16,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// nxFile holds the parsed state of the currently loaded NX file.
+// nxFile holds the parsed state of a loaded NX file.
 type nxFile struct {
 	path    string
 	nodes   []gonx.Node
@@ -25,9 +26,36 @@ type nxFile struct {
 }
 
 var (
-	mu      sync.RWMutex
-	current *nxFile
+	mu     sync.RWMutex
+	loaded map[string]*nxFile // keyed by base filename, e.g. "Data.nx"
 )
+
+// resolveFile returns the nxFile to operate on.
+// If fileName is empty and exactly one file is loaded, that file is returned.
+// If fileName is empty and multiple files are loaded, an error message is returned.
+// Otherwise the file is looked up by base name (case-sensitive).
+func resolveFile(fileName string) (*nxFile, string) {
+	if len(loaded) == 0 {
+		return nil, "no NX files loaded — call nx_load first"
+	}
+	if fileName == "" {
+		if len(loaded) == 1 {
+			for _, f := range loaded {
+				return f, ""
+			}
+		}
+		names := make([]string, 0, len(loaded))
+		for k := range loaded {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		return nil, fmt.Sprintf("multiple NX files loaded, specify 'file': %s", strings.Join(names, ", "))
+	}
+	if f, ok := loaded[filepath.Base(fileName)]; ok {
+		return f, ""
+	}
+	return nil, fmt.Sprintf("file not loaded: %s", fileName)
+}
 
 // nodeTypeName returns a human-readable type name.
 func nodeTypeName(t uint16) string {
@@ -157,44 +185,68 @@ func walkSearch(n *gonx.Node, nodes []gonx.Node, strs []string, patternLower, cu
 // ---- Tool handlers ----
 
 func handleNxLoad(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	filePath, err := req.RequireString("file")
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+	dirPath := req.GetString("dir", "")
+	if dirPath == "" {
+		var err error
+		dirPath, err = os.Getwd()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to get working directory: %v", err)), nil
+		}
 	}
-	filePath = filepath.Clean(filePath)
+	dirPath = filepath.Clean(dirPath)
 
-	nodes, strs, bitmaps, audio, err := gonx.Parse(filePath)
+	entries, err := os.ReadDir(dirPath)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to parse NX file: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("failed to read directory %s: %v", dirPath, err)), nil
+	}
+
+	var nxPaths []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".nx") {
+			nxPaths = append(nxPaths, filepath.Join(dirPath, e.Name()))
+		}
+	}
+	if len(nxPaths) == 0 {
+		return mcp.NewToolResultError(fmt.Sprintf("no .nx files found in %s", dirPath)), nil
+	}
+
+	newLoaded := make(map[string]*nxFile, len(nxPaths))
+	var sb strings.Builder
+	for _, fp := range nxPaths {
+		nodes, strs, bitmaps, audio, err := gonx.Parse(fp)
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("SKIP %s: %v\n", filepath.Base(fp), err))
+			continue
+		}
+		baseName := filepath.Base(fp)
+		newLoaded[baseName] = &nxFile{
+			path:    fp,
+			nodes:   nodes,
+			strings: strs,
+			bitmaps: bitmaps,
+			audio:   audio,
+		}
+		sb.WriteString(fmt.Sprintf("Loaded %s\n  nodes:   %d\n  strings: %d\n  bitmaps: %d\n  audio:   %d\n",
+			baseName, len(nodes), len(strs), len(bitmaps), len(audio)))
+	}
+
+	if len(newLoaded) == 0 {
+		return mcp.NewToolResultError(sb.String()), nil
 	}
 
 	mu.Lock()
-	current = &nxFile{
-		path:    filePath,
-		nodes:   nodes,
-		strings: strs,
-		bitmaps: bitmaps,
-		audio:   audio,
-	}
+	loaded = newLoaded
 	mu.Unlock()
 
-	summary := fmt.Sprintf(
-		"Loaded %s\n  nodes:   %d\n  strings: %d\n  bitmaps: %d\n  audio:   %d",
-		filepath.Base(filePath),
-		len(nodes),
-		len(strs),
-		len(bitmaps),
-		len(audio),
-	)
-	return mcp.NewToolResultText(summary), nil
+	return mcp.NewToolResultText(sb.String()), nil
 }
 
 func handleNxListNode(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	mu.RLock()
-	f := current
+	f, errMsg := resolveFile(req.GetString("file", ""))
 	mu.RUnlock()
 	if f == nil {
-		return mcp.NewToolResultError("no NX file loaded — call nx_load first"), nil
+		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	nodePath := req.GetString("path", "")
@@ -223,10 +275,10 @@ func handleNxListNode(_ context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 
 func handleNxGetNode(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	mu.RLock()
-	f := current
+	f, errMsg := resolveFile(req.GetString("file", ""))
 	mu.RUnlock()
 	if f == nil {
-		return mcp.NewToolResultError("no NX file loaded — call nx_load first"), nil
+		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	nodePath, err := req.RequireString("path")
@@ -273,10 +325,10 @@ func handleNxGetNode(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolR
 
 func handleNxSearch(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	mu.RLock()
-	f := current
+	f, errMsg := resolveFile(req.GetString("file", ""))
 	mu.RUnlock()
 	if f == nil {
-		return mcp.NewToolResultError("no NX file loaded — call nx_load first"), nil
+		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	pattern, err := req.RequireString("pattern")
@@ -320,13 +372,12 @@ func main() {
 		server.WithToolCapabilities(false),
 	)
 
-	// nx_load — load an NX file into memory
+	// nx_load — load all NX files in a directory into memory
 	s.AddTool(
 		mcp.NewTool("nx_load",
-			mcp.WithDescription("Load an NX (PKG4) file from disk into memory. Must be called before any other nx_* tool."),
-			mcp.WithString("file",
-				mcp.Required(),
-				mcp.Description("Absolute or relative path to the .nx file to load."),
+			mcp.WithDescription("Load all NX (PKG4) files from a directory into memory. If 'dir' is omitted, the current working directory is used. Must be called before any other nx_* tool."),
+			mcp.WithString("dir",
+				mcp.Description("Path to a directory containing one or more .nx files. Defaults to the current working directory."),
 			),
 		),
 		handleNxLoad,
@@ -335,7 +386,10 @@ func main() {
 	// nx_list_node — print a subtree starting at a path
 	s.AddTool(
 		mcp.NewTool("nx_list_node",
-			mcp.WithDescription("List the children of a node in the loaded NX file. Omit 'path' to start from the root node."),
+			mcp.WithDescription("List the children of a node in a loaded NX file. Omit 'path' to start from the root node."),
+			mcp.WithString("file",
+				mcp.Description("Base name of the NX file to query (e.g. \"Data.nx\"). Required when multiple files are loaded; may be omitted when only one file is loaded."),
+			),
 			mcp.WithString("path",
 				mcp.Description("Slash-separated node path, e.g. \"Character/00002000.img\". Leave empty for root."),
 			),
@@ -350,6 +404,9 @@ func main() {
 	s.AddTool(
 		mcp.NewTool("nx_get_node",
 			mcp.WithDescription("Get detailed information about a specific node: its type, data value, and immediate children."),
+			mcp.WithString("file",
+				mcp.Description("Base name of the NX file to query (e.g. \"Data.nx\"). Required when multiple files are loaded; may be omitted when only one file is loaded."),
+			),
 			mcp.WithString("path",
 				mcp.Required(),
 				mcp.Description("Slash-separated node path, e.g. \"Character/00002000.img/stand1/0\"."),
@@ -361,7 +418,10 @@ func main() {
 	// nx_search — search for nodes by name
 	s.AddTool(
 		mcp.NewTool("nx_search",
-			mcp.WithDescription("Search all nodes in the loaded NX file for names containing a pattern (case-insensitive substring match). Returns matching full paths."),
+			mcp.WithDescription("Search all nodes in a loaded NX file for names containing a pattern (case-insensitive substring match). Returns matching full paths."),
+			mcp.WithString("file",
+				mcp.Description("Base name of the NX file to search (e.g. \"Data.nx\"). Required when multiple files are loaded; may be omitted when only one file is loaded."),
+			),
 			mcp.WithString("pattern",
 				mcp.Required(),
 				mcp.Description("Substring to search for in node names."),
