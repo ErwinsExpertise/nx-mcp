@@ -118,8 +118,10 @@ func printTree(n *gonx.Node, nodes []gonx.Node, strs []string, level, maxDepth i
 	}
 }
 
-// walkSearch does a DFS and collects paths whose node name matches the pattern.
-func walkSearch(n *gonx.Node, nodes []gonx.Node, strs []string, pattern, currentPath string, results *[]string, maxResults int) {
+// walkSearch does a DFS and collects paths whose node name matches patternLower
+// (a pre-lowercased search string). Callers must lowercase the pattern before the
+// first call so the comparison is not repeated on every node visit.
+func walkSearch(n *gonx.Node, nodes []gonx.Node, strs []string, patternLower, currentPath string, results *[]string, maxResults int) {
 	if len(*results) >= maxResults {
 		return
 	}
@@ -133,7 +135,7 @@ func walkSearch(n *gonx.Node, nodes []gonx.Node, strs []string, pattern, current
 	} else {
 		nodePath = currentPath + "/" + name
 	}
-	if strings.Contains(strings.ToLower(name), strings.ToLower(pattern)) {
+	if strings.Contains(strings.ToLower(name), patternLower) {
 		typeName := nodeTypeName(n.Type)
 		data := nodeDataString(*n, strs)
 		entry := fmt.Sprintf("%s  [%s]", nodePath, typeName)
@@ -148,7 +150,7 @@ func walkSearch(n *gonx.Node, nodes []gonx.Node, strs []string, pattern, current
 			break
 		}
 		child := nodes[idx]
-		walkSearch(&child, nodes, strs, pattern, nodePath, results, maxResults)
+		walkSearch(&child, nodes, strs, patternLower, nodePath, results, maxResults)
 	}
 }
 
@@ -292,7 +294,7 @@ func handleNxSearch(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolRe
 
 	root := f.nodes[0]
 	var results []string
-	walkSearch(&root, f.nodes, f.strings, pattern, "", &results, maxResults)
+	walkSearch(&root, f.nodes, f.strings, strings.ToLower(pattern), "", &results, maxResults)
 
 	if len(results) == 0 {
 		return mcp.NewToolResultText(fmt.Sprintf("no nodes found matching %q", pattern)), nil

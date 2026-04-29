@@ -52,10 +52,10 @@ nx_load   file="/path/to/Data.nx"
       audio:   0
 
 nx_list_node   path=""   depth=1
-  → (root)  [none]  children=14
-      Character  [none]  children=25
-      Effect     [none]  children=10
-      ...
+  →   [none]  children=14
+        Character  [none]  children=25
+        Effect     [none]  children=10
+        ...
 
 nx_get_node   path="Character/00002000.img"
   → name:     00002000.img
